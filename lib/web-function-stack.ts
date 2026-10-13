@@ -46,7 +46,11 @@ export class WebFunctionStack extends cdk.Stack {
       }),
     );
 
-    // esbuild で index.js 1ファイルにまとめ、zip のまま専用バケットへ置く。
+    // runtime は既定で index.js を読む。ESM で出力するため .mjs にし、
+    // revision の AWS_LAMBDA_NODEJS_ENTRYPOINT で指定する
+    const entrypoint = 'index.mjs';
+
+    // esbuild で 1ファイルにまとめ、zip のまま専用バケットへ置く。
     // 稼働中の revision が参照するオブジェクトを消すと revision が Failed になるため prune しない
     const code = new s3deploy.BucketDeployment(this, 'CodeDeployment', {
       sources: [
@@ -58,11 +62,11 @@ export class WebFunctionStack extends cdk.Stack {
               tryBundle(outputDir) {
                 buildSync({
                   entryPoints: [path.join(appDir, 'src/index.ts')],
-                  outfile: path.join(outputDir, 'index.js'),
+                  outfile: path.join(outputDir, entrypoint),
                   bundle: true,
                   platform: 'node',
                   target: 'node24',
-                  format: 'cjs',
+                  format: 'esm',
                   minify: true,
                 });
                 return true;
@@ -105,6 +109,7 @@ export class WebFunctionStack extends cdk.Stack {
       serviceConfig: {
         executionRoleArn: executionRole.roleArn,
         timeoutSeconds: 30,
+        environmentVariables: { AWS_LAMBDA_NODEJS_ENTRYPOINT: entrypoint },
       },
     });
     // revision 作成時に Lambda がバケットを読めるよう、バケットポリシーの反映を先に済ませる
