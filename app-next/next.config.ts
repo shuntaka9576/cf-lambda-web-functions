@@ -7,6 +7,10 @@ const nextConfig: NextConfig = {
   // standalone の出力が .next/standalone/app-next/ にずれる
   outputFileTracingRoot: __dirname,
   turbopack: { root: __dirname },
+  // 既定の 1 年だと、アクセスが途切れたあとにいくらでも古い内容を stale として返す。
+  // expire を過ぎた entry は Next.js がその場で描画し直し、
+  // Cache-Control の stale-while-revalidate も (expireTime - revalidate) 秒になる
+  expireTime: 20,
 };
 
 export default nextConfig;

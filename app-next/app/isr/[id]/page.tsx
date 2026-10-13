@@ -1,6 +1,6 @@
 import { RenderInfo } from '../../_components/render-info';
 
-export const revalidate = 30;
+export const revalidate = 10;
 
 // 1 と 2 だけビルド時に生成する。それ以外は初回リクエストを受けた環境で生成される
 export const dynamicParams = true;

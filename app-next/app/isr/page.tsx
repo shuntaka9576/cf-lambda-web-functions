@@ -1,8 +1,8 @@
 import { RenderInfo } from '../_components/render-info';
 
-// 30 秒ごとの時間ベース ISR。renderedBy でどの実行環境が再生成したかを見る。
+// 10 秒ごとの時間ベース ISR。renderedBy でどの実行環境が再生成したかを見る。
 // ビルド時の事前生成では POC_ENV_ID が無いので "build" になる
-export const revalidate = 30;
+export const revalidate = 10;
 
 export default function IsrPage() {
   return (
