@@ -1,0 +1,27 @@
+{
+  "name": "cf-lambda-web-functions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch app/src/index.ts",
+    "type-check": "tsc --noEmit",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.4",
+    "aws-cdk-lib": "^2.273.0",
+    "constructs": "^10.8.1",
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "aws-cdk": "^2.1145.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
