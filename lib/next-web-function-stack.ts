@@ -56,28 +56,34 @@ export class NextWebFunctionStack extends cdk.Stack {
           exclude: ['node_modules', '.next', 'next-env.d.ts', '*.tsbuildinfo'],
           bundling: {
             image: cdk.DockerImage.fromRegistry('public.ecr.aws/docker/library/node:24'),
+            // CDK に zip させると全ファイルの日時が 1980-01-01 に固定される。
+            // Next.js は事前生成ページの描画時刻をファイルの mtime から取るため、
+            // 事前生成ページが常に期限切れ扱いになる。日時を残すため自前で zip する
+            outputType: cdk.BundlingOutput.ARCHIVED,
             local: {
               tryBundle(outputDir) {
                 execSync('bun install --frozen-lockfile && bun run build', {
                   cwd: appNextDir,
                   stdio: 'inherit',
                 });
+                const packageDir = path.join(appNextDir, '.next/lambda-package');
+                fs.rmSync(packageDir, { recursive: true, force: true });
+                const copy = (from: string, to: string) =>
+                  fs.cpSync(from, to, { recursive: true, preserveTimestamps: true });
                 // standalone の server.js は public と .next/static を自分では持たないのでコピーする
-                fs.cpSync(path.join(appNextDir, '.next/standalone'), outputDir, { recursive: true });
-                fs.cpSync(
-                  path.join(appNextDir, '.next/static'),
-                  path.join(outputDir, '.next/static'),
-                  { recursive: true },
-                );
+                copy(path.join(appNextDir, '.next/standalone'), packageDir);
+                copy(path.join(appNextDir, '.next/static'), path.join(packageDir, '.next/static'));
                 const publicDir = path.join(appNextDir, 'public');
                 if (fs.existsSync(publicDir)) {
-                  fs.cpSync(publicDir, path.join(outputDir, 'public'), { recursive: true });
+                  copy(publicDir, path.join(packageDir, 'public'));
                 }
                 // runtime が既定で読む index.js から server.js を起動する
-                fs.copyFileSync(
-                  path.join(appNextDir, 'lambda/index.js'),
-                  path.join(outputDir, 'index.js'),
-                );
+                copy(path.join(appNextDir, 'lambda/index.js'), path.join(packageDir, 'index.js'));
+                // zip はタイムゾーンを持たない現地時刻で日時を記録するので、Lambda と同じ UTC で作る
+                execSync(`zip -qr ${JSON.stringify(path.join(outputDir, 'app.zip'))} .`, {
+                  cwd: packageDir,
+                  env: { ...process.env, TZ: 'UTC' },
+                });
                 return true;
               },
             },
@@ -185,6 +191,24 @@ export class NextWebFunctionStack extends cdk.Stack {
       originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     };
 
+    // CloudFront はキャッシュから返すときに Server-Timing を落とす。
+    // ページの JS が経路を判定できるよう、オリジンが付けた x-poc-* から毎回組み立て直す
+    const serverTimingFunction = new cloudfront.Function(this, 'ServerTimingFunction', {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(`
+function handler(event) {
+  var headers = event.response.headers;
+  var originAt = headers['x-poc-origin-at'];
+  var envId = headers['x-poc-env-id'];
+  if (originAt) {
+    var metrics = ['origin;desc="' + originAt.value + '"'];
+    if (envId) metrics.push('env;desc="' + envId.value + '"');
+    headers['server-timing'] = { value: metrics.join(', ') };
+  }
+  return event.response;
+}`),
+    });
+
     const distribution = new cloudfront.Distribution(this, 'Distribution', {
       defaultBehavior: {
         ...behavior,
@@ -192,7 +216,16 @@ export class NextWebFunctionStack extends cdk.Stack {
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       },
       additionalBehaviors: {
-        '/isr*': { ...behavior, cachePolicy: isrCachePolicy },
+        '/isr*': {
+          ...behavior,
+          cachePolicy: isrCachePolicy,
+          functionAssociations: [
+            {
+              function: serverTimingFunction,
+              eventType: cloudfront.FunctionEventType.VIEWER_RESPONSE,
+            },
+          ],
+        },
         // ファイル名にハッシュが入った immutable なアセット
         '/_next/static/*': { ...behavior, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
       },
