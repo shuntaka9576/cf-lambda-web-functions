@@ -2,7 +2,7 @@
   "app": "npx tsx bin/app.ts",
   "watch": {
     "include": ["**"],
-    "exclude": ["README.md", "cdk*.json", "tsconfig.json", "package*.json", "bun.lock", "node_modules", "cdk.out", "app-next/node_modules", "app-next/.next"]
+    "exclude": ["README.md", "cdk*.json", "tsconfig.json", "package*.json", "bun.lock", "node_modules", "cdk.out", "app-next/node_modules", "app-next/.next", "app-rust/target"]
   },
   "context": {
     "@aws-cdk/core:checkSecretUsage": true,
