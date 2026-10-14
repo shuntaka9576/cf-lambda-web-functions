@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rust on Web Functions</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --bg: #ffffff;
+        --line: #d1d9e0;
+        --ok: #1a7f37;
+        --ng: #d1242f;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #f0f6fc;
+          --muted: #9198a1;
+          --bg: #0d1117;
+          --line: #3d444d;
+          --ok: #3fb950;
+          --ng: #f85149;
+        }
+      }
+      body {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 24px 16px;
+        font-family: system-ui, sans-serif;
+        line-height: 1.6;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: 1.1rem;
+      }
+      section {
+        margin-top: 16px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      code,
+      pre,
+      textarea,
+      table {
+        font-family: ui-monospace, monospace;
+        font-size: 0.85rem;
+      }
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+      }
+      pre {
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 2px 8px;
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .ng {
+        color: var(--ng);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Rust (Axum) on Lambda Web Functions</h1>
+
+    <section>
+      <h2>SSE <code>GET /stream</code></h2>
+      <p class="muted">
+        サーバーが 1 秒おきに送るイベントを、受信した時刻と並べる。経過が 1 秒刻みで増えればバッファされずに届いている
+      </p>
+      <button id="sse-start">受信開始</button>
+      <table>
+        <thead>
+          <tr>
+            <th>i</th>
+            <th>サーバー送信</th>
+            <th>ブラウザ受信</th>
+            <th>開始からの経過</th>
+          </tr>
+        </thead>
+        <tbody id="sse-rows"></tbody>
+      </table>
+      <p id="sse-status" class="muted"></p>
+    </section>
+
+    <section>
+      <h2>POST <code>/echo</code></h2>
+      <p class="muted">
+        body を送り、サーバーが受け取った body の SHA-256 をブラウザで計算した値と比べる
+      </p>
+      <textarea id="echo-body" rows="4">hello web functions</textarea>
+      <button id="echo-send">送信</button>
+      <p id="echo-verdict"></p>
+      <pre id="echo-result"></pre>
+
+      <h3>連続送信</h3>
+      <p class="muted">
+        1 件ずつ順に送り、応答した実行環境を並べる。envId が 1 種類で echoCount が 1 ずつ増えれば、同じ環境が応答し続けている
+      </p>
+      <label>回数 <input id="burst-count" type="number" value="10" min="1" max="100" /></label>
+      <button id="burst-send">連続送信</button>
+      <table id="burst-table" hidden>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>HTTP</th>
+            <th>応答</th>
+            <th>envId</th>
+            <th>echoCount</th>
+            <th>SHA-256</th>
+          </tr>
+        </thead>
+        <tbody id="burst-rows"></tbody>
+      </table>
+      <pre id="burst-summary"></pre>
+    </section>
+
+    <script>
+      const sseStart = document.getElementById('sse-start');
+      const sseRows = document.getElementById('sse-rows');
+      const sseStatus = document.getElementById('sse-status');
+
+      sseStart.addEventListener('click', () => {
+        sseStart.disabled = true;
+        sseRows.replaceChildren();
+        sseStatus.textContent = '接続中…';
+        const startedAt = performance.now();
+        const source = new EventSource('/stream');
+        source.onmessage = (e) => {
+          const { i, time } = JSON.parse(e.data);
+          const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2);
+          const tr = document.createElement('tr');
+          for (const value of [i, time, new Date().toISOString(), `${elapsed}s`]) {
+            const td = document.createElement('td');
+            td.textContent = value;
+            tr.append(td);
+          }
+          sseRows.append(tr);
+        };
+        // サーバーが 5 件送って閉じると EventSource は再接続しようとして error になるので、そこで止める
+        source.onerror = () => {
+          source.close();
+          sseStatus.textContent = `終了 (${sseRows.childElementCount} 件受信)`;
+          sseStart.disabled = false;
+        };
+      });
+
+      const echoBody = document.getElementById('echo-body');
+      const echoSend = document.getElementById('echo-send');
+      const echoVerdict = document.getElementById('echo-verdict');
+      const echoResult = document.getElementById('echo-result');
+
+      // body を POST し、サーバーが返した SHA-256 をブラウザで計算した値と比べる
+      async function postEcho(value) {
+        const body = new TextEncoder().encode(value);
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', body));
+        const expected = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+        const startedAt = performance.now();
+        // x-amz-content-sha256 は付けずに送る
+        const res = await fetch('/echo', {
+          method: 'POST',
+          headers: { 'content-type': 'text/plain' },
+          body,
+        });
+        const text = await res.text();
+        const ms = Math.round(performance.now() - startedAt);
+        let json = null;
+        try {
+          json = JSON.parse(text);
+        } catch {}
+        // Lambda が応答した実行環境のログストリームを返す。ローカルでは付かない
+        const logStream = res.headers.get('lambda-web-logstream') ?? '(ヘッダーなし)';
+        return { res, text, json, expected, ms, logStream, matched: json?.sha256 === expected };
+      }
+
+      echoSend.addEventListener('click', async () => {
+        echoSend.disabled = true;
+        echoVerdict.textContent = '';
+        echoResult.textContent = '';
+        try {
+          const { res, text, expected, logStream, matched } = await postEcho(echoBody.value);
+          echoVerdict.className = matched ? 'ok' : 'ng';
+          echoVerdict.textContent = matched ? 'SHA-256 一致' : 'SHA-256 不一致';
+          echoResult.textContent = [
+            `HTTP ${res.status}`,
+            `lambda-web-request-id: ${res.headers.get('lambda-web-request-id') ?? '-'}`,
+            `lambda-web-logstream: ${logStream}`,
+            `response: ${text}`,
+            `browser sha256: ${expected}`,
+          ].join('\n');
+        } catch (err) {
+          echoVerdict.className = 'ng';
+          echoVerdict.textContent = String(err);
+        } finally {
+          echoSend.disabled = false;
+        }
+      });
+
+      const burstCount = document.getElementById('burst-count');
+      const burstSend = document.getElementById('burst-send');
+      const burstTable = document.getElementById('burst-table');
+      const burstRows = document.getElementById('burst-rows');
+      const burstSummary = document.getElementById('burst-summary');
+
+      burstSend.addEventListener('click', async () => {
+        burstSend.disabled = true;
+        burstTable.hidden = false;
+        burstRows.replaceChildren();
+        burstSummary.textContent = '';
+        const count = Number(burstCount.value);
+        const envIds = new Map();
+        const logStreams = new Map();
+        const tally = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+        const lines = (label, map) => [
+          `${label}: ${map.size} 種類`,
+          ...Array.from(map, ([key, n]) => `  ${key} × ${n}`),
+        ];
+        try {
+          // 並列にすると別の環境に振られうるので、前の応答を待ってから次を送る
+          for (let n = 1; n <= count; n++) {
+            const { res, json, ms, logStream, matched } = await postEcho(echoBody.value);
+            const envId = json?.envId ?? '-';
+            tally(envIds, envId);
+            tally(logStreams, logStream);
+
+            const tr = document.createElement('tr');
+            const cells = [n, res.status, `${ms}ms`, envId.slice(0, 8), json?.echoCount ?? '-'];
+            for (const value of cells) {
+              const td = document.createElement('td');
+              td.textContent = value;
+              tr.append(td);
+            }
+            const td = document.createElement('td');
+            td.className = matched ? 'ok' : 'ng';
+            td.textContent = matched ? '一致' : '不一致';
+            tr.append(td);
+            burstRows.append(tr);
+          }
+          burstSummary.textContent = [
+            envIds.size === 1 ? `${count} 件すべて同じ実行環境が応答` : `${envIds.size} 個の実行環境に分かれた`,
+            ...lines('envId', envIds),
+            ...lines('lambda-web-logstream', logStreams),
+          ].join('\n');
+        } catch (err) {
+          burstSummary.textContent = String(err);
+        } finally {
+          burstSend.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

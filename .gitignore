@@ -4,3 +4,4 @@ cdk.out/
 next-env.d.ts
 *.tsbuildinfo
 .env*
+target/

@@ -1,0 +1,4 @@
+[toolchain]
+channel = "1.97.1"
+# Web Functions は Arm64 (Graviton) 固定。実行環境の glibc に依存しないよう musl で静的リンクする
+targets = ["aarch64-unknown-linux-musl"]
