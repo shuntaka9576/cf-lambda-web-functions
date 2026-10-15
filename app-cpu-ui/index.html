@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CPU Blocking Bench</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --bg: #ffffff;
+        --panel: #f6f8fa;
+        --line: #d1d9e0;
+        --accent: #0969da;
+        --cpu: #d4720b;
+        --ping: #0969da;
+        --wait: #d1242f;
+        --other: #8c959f;
+        --ok: #1a7f37;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #f0f6fc;
+          --muted: #9198a1;
+          --bg: #0d1117;
+          --panel: #151b23;
+          --line: #3d444d;
+          --accent: #4493f8;
+          --cpu: #f0883e;
+          --ping: #4493f8;
+          --wait: #f85149;
+          --other: #6e7681;
+          --ok: #3fb950;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 24px 16px 64px;
+        font-family: system-ui, sans-serif;
+        line-height: 1.6;
+        color: var(--fg);
+        background: var(--bg);
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.3rem;
+      }
+      h2 {
+        margin: 0;
+        font-size: 1rem;
+      }
+      code {
+        font-family: ui-monospace, monospace;
+        font-size: 0.9em;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .small {
+        font-size: 0.85rem;
+      }
+      p {
+        margin: 4px 0;
+      }
+
+      /* 左に設定、右に結果。狭い画面では縦に並べる */
+      .layout {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        gap: 32px;
+      }
+      .side {
+        position: sticky;
+        top: 24px;
+        align-self: start;
+      }
+      @media (max-width: 800px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .side {
+          position: static;
+        }
+      }
+      .form {
+        display: grid;
+        gap: 10px;
+        margin: 20px 0;
+        font-size: 0.9rem;
+      }
+      .form label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+      .form input[type='number'] {
+        width: 5.5em;
+      }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        padding: 6px 16px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        font-weight: 600;
+      }
+
+      /* 結果の表。行が実装、列が /ping を送ったときの状況 */
+      .table-wrap {
+        overflow-x: auto;
+      }
+      table.matrix {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 6px;
+      }
+      .matrix th {
+        font-weight: 600;
+        text-align: left;
+        white-space: nowrap;
+      }
+      .matrix thead th {
+        font-size: 0.85rem;
+        color: var(--muted);
+        text-align: center;
+      }
+      .matrix td {
+        width: 26%;
+        padding: 0;
+      }
+      .cell {
+        position: relative;
+        width: 100%;
+        min-height: 72px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg);
+        color: inherit;
+        text-align: center;
+      }
+      .cell:hover {
+        border-color: var(--accent);
+      }
+      .cell.running {
+        border-style: dashed;
+        border-color: var(--accent);
+      }
+      .cell.selected {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+      .badge {
+        padding: 0 6px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--bg);
+        font-size: 0.7rem;
+        font-weight: 600;
+      }
+      .cell .badge {
+        position: absolute;
+        top: 4px;
+        left: 6px;
+      }
+      .cell .v {
+        font-size: 1.4rem;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .cell .sub {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .cell.waited .v,
+      .cell.waited .sub {
+        color: var(--wait);
+      }
+
+      /* 選んだ 2 つのマスの試行ごとのタイムラインを上下に並べる。幅がそろうので、バーの長さをそのまま見比べられる */
+      .compare {
+        display: grid;
+        gap: 16px;
+        margin-top: 16px;
+      }
+      section.detail {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .detail header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        align-items: baseline;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 14px;
+        margin: 8px 0;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .swatch {
+        display: inline-block;
+        width: 12px;
+        height: 8px;
+        margin-right: 4px;
+        border-radius: 2px;
+        vertical-align: middle;
+      }
+      .row,
+      .axis {
+        display: grid;
+        grid-template-columns: 2em 1fr 4.5em 6em;
+        gap: 8px;
+        align-items: center;
+        font-size: 0.8rem;
+      }
+      .row {
+        min-height: 20px;
+      }
+      .axis {
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+      /* 目盛りの数字はグリッド線と同じ位置に置く。両端は内側に寄せてはみ出さないようにする */
+      .axis .scale {
+        position: relative;
+        height: 1.4em;
+      }
+      .axis .scale span {
+        position: absolute;
+        transform: translateX(-50%);
+        white-space: nowrap;
+      }
+      .axis .scale span:first-child {
+        transform: none;
+      }
+      .axis .scale span:last-child {
+        transform: translateX(-100%);
+      }
+      .row .n {
+        text-align: right;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .row .ms {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .track {
+        display: grid;
+        gap: 2px;
+        padding: 2px 0;
+        background: repeating-linear-gradient(
+          to right,
+          transparent 0,
+          transparent calc(10% - 1px),
+          var(--line) calc(10% - 1px),
+          var(--line) 10%
+        );
+      }
+      .lane {
+        position: relative;
+        height: 6px;
+        /* 横軸は固定なので、幅を超えたバーは端で切る */
+        overflow: hidden;
+      }
+      .bar {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        min-width: 2px;
+        border-radius: 2px;
+      }
+      .bar.cpu {
+        background: var(--cpu);
+      }
+      .bar.ping {
+        background: var(--ping);
+      }
+      .bar.ping.wait {
+        background: var(--wait);
+      }
+      .bar.ping.other {
+        background: var(--other);
+      }
+      .chip {
+        padding: 0 6px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        text-align: center;
+        white-space: nowrap;
+      }
+      .chip.same {
+        border-color: var(--ok);
+        color: var(--ok);
+      }
+      .chip.warn {
+        border-color: var(--wait);
+        color: var(--wait);
+      }
+      details.raw pre {
+        max-height: 240px;
+        overflow: auto;
+        padding: 8px;
+        background: var(--panel);
+        border-radius: 6px;
+        font-size: 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="side">
+        <h1>CPU バウンドな処理は、同じ環境のリクエストを待たせるか</h1>
+        <p class="muted small">
+          <code>/cpu</code>（指定した時間だけ CPU を回す）の最中に <code>/ping</code> を送り、応答時間を比べます。
+        </p>
+        <div class="form">
+          <label>回数 <input id="runs" type="number" value="20" min="1" max="100" /></label>
+          <label>CPU を回す時間 (ms) <input id="cpu-ms" type="number" value="100" min="1" max="5000" /></label>
+          <label>/cpu → /ping の間隔 (ms) <input id="delay" type="number" value="15" min="0" max="1000" /></label>
+          <label>試行の間隔 (ms) <input id="interval" type="number" value="500" min="0" max="5000" /></label>
+          <label>横軸の幅 (ms) <input id="axis" type="number" value="500" min="50" max="5000" step="50" /></label>
+          <div class="buttons">
+            <button id="run" class="primary">計測する</button>
+            <button id="stop" disabled>停止</button>
+          </div>
+          <p id="progress" class="muted small" role="status"></p>
+        </div>
+        <p class="muted small" id="env-info">CPU 数を取得中…</p>
+        <div class="buttons">
+          <button id="copy-md">Markdown でコピー</button>
+        </div>
+        <p id="copied" class="muted small" role="status"></p>
+      </aside>
+
+      <main>
+        <div class="table-wrap">
+          <table class="matrix">
+            <thead>
+              <tr>
+                <th></th>
+                <th>/ping だけ</th>
+                <th>/cpu 1 本の最中</th>
+                <th>/cpu 2 本の最中</th>
+              </tr>
+            </thead>
+            <tbody id="matrix"></tbody>
+          </table>
+        </div>
+        <p class="muted small">
+          /ping の応答時間の中央値。相乗り（/cpu を処理中の実行環境に /ping も振り分けられた）試行だけで集計し、赤は
+          /cpu の終了を待った試行がある。マスを 2 つまで選ぶと、下で上下に並べて比べられます
+        </p>
+        <div id="compare" class="compare"></div>
+      </main>
+    </div>
+
+    <script>
+      const ROWS = [
+        { target: 'node', label: 'Node.js' },
+        { target: 'go', label: 'Go' },
+      ];
+      const COLUMNS = ['/ping だけ', '/cpu 1 本の最中', '/cpu 2 本の最中'];
+      // 実装ごとに、/cpu を 0〜2 本送った状態で /ping を測る
+      const PATTERNS = ROWS.flatMap((row) =>
+        [0, 1, 2].map((count) => ({ id: `${row.target}-${count}`, target: row.target, count, label: `${row.label} ${COLUMNS[count]}` })),
+      );
+      const WARMUP = 3;
+
+      const $ = (id) => document.getElementById(id);
+      const el = (tag, props = {}, ...children) => {
+        const node = Object.assign(document.createElement(tag), props);
+        node.append(...children);
+        return node;
+      };
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      // タブが裏に回ると setTimeout は 1 秒単位に間引かれる。/ping を送るまでの待ちは
+      // 間引かれない MessageChannel で刻み、指定した ms で送れるようにする
+      const channel = new MessageChannel();
+      const preciseSleep = (ms) =>
+        new Promise((resolve) => {
+          const until = performance.now() + ms;
+          const tick = () => (performance.now() >= until ? resolve() : channel.port2.postMessage(null));
+          channel.port1.onmessage = tick;
+          tick();
+        });
+      const fmt = (v) => (v == null ? '—' : `${Math.round(v)} ms`);
+
+      // 実行環境から見える CPU 数。ここで両方の環境を起こしておく意味もある
+      (async () => {
+        const read = (target) => fetch(`/${target}/info`, { cache: 'no-store' }).then((r) => r.json());
+        try {
+          const [node, go] = await Promise.all([read('node'), read('go')]);
+          $('env-info').textContent = `CPU 数: Node.js ${node.availableParallelism}（os.availableParallelism）、Go ${go.numCPU}（GOMAXPROCS ${go.gomaxprocs}）`;
+        } catch (err) {
+          $('env-info').textContent = `CPU 数を取得できませんでした（${err}）`;
+        }
+      })();
+
+      async function get(path) {
+        const start = performance.now();
+        const res = await fetch(path, { cache: 'no-store' });
+        const text = await res.text();
+        const end = performance.now();
+        let body;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = { error: text.slice(0, 200) };
+        }
+        // Lambda が応答に付ける実行環境ごとのログストリーム名。ローカルでは付かない
+        return { ...body, status: res.status, start, end, logStream: res.headers.get('lambda-web-logstream') };
+      }
+
+      // /cpu を count 本送り、delay ms 後に /ping を送る。時刻は試行の開始からの ms にそろえる
+      async function trial(p, { delay, cpuMs }) {
+        const t0 = performance.now();
+        const pending = Array.from({ length: p.count }, () => get(`/${p.target}/cpu?ms=${cpuMs}`));
+        if (p.count) await preciseSleep(delay);
+        const ping = await get(`/${p.target}/ping`);
+        const cpus = await Promise.all(pending);
+        for (const r of [ping, ...cpus]) {
+          r.start -= t0;
+          r.end -= t0;
+        }
+        if ([ping, ...cpus].some((r) => r.status !== 200)) {
+          throw new Error([ping, ...cpus].map((r) => `${r.status} ${r.error ?? ''}`).join(' / '));
+        }
+        const same = cpus.filter((c) => c.envId === ping.envId);
+        return {
+          ping,
+          cpus,
+          // /ping を送る前に /cpu の応答が届いていたら、重なりを測れていないので集計から外す
+          invalid: cpus.some((c) => c.end <= ping.start),
+          sameEnv: cpus.length ? same.length > 0 : null,
+          // アプリの envId とは別に、Lambda のログストリームでも同じ環境かを確かめる
+          sameLogStream: ping.logStream && cpus.length ? cpus.some((c) => c.logStream === ping.logStream) : null,
+          // 同じ環境の /cpu が終わってから /ping のハンドラーが動いたか。同じプロセスの時計どうしで比べる
+          waited: same.some((c) => ping.receivedAt >= c.finishedAt),
+        };
+      }
+
+      function percentile(values, q) {
+        if (!values.length) return null;
+        const sorted = [...values].sort((a, b) => a - b);
+        return sorted[Math.max(0, Math.ceil(sorted.length * q) - 1)];
+      }
+
+      function summarize(p, trials) {
+        const rtt = (r) => r.ping.end - r.ping.start;
+        const valid = trials.filter((r) => !r.error && !r.invalid);
+        const same = p.count ? valid.filter((r) => r.sameEnv) : valid;
+        const other = p.count ? valid.filter((r) => !r.sameEnv) : [];
+        const pings = same.map(rtt);
+        const checked = valid.filter((r) => r.sameLogStream !== null);
+        return {
+          valid: valid.length,
+          errors: trials.filter((r) => r.error).length,
+          invalid: trials.filter((r) => r.invalid).length,
+          same: same.length,
+          waited: same.filter((r) => r.waited).length,
+          mismatch: checked.filter((r) => r.sameLogStream !== r.sameEnv).length,
+          p50: percentile(pings, 0.5),
+          p95: percentile(pings, 0.95),
+          max: pings.length ? Math.max(...pings) : null,
+          otherP50: percentile(other.map(rtt), 0.5),
+          cpuP50: percentile(valid.flatMap((r) => r.cpus.map((c) => c.ms)), 0.5),
+        };
+      }
+
+      const results = new Map();
+      let running = null;
+      // 下で上下に並べるマス。最初は /cpu 1 本の最中の Node.js と Go を比べる
+      let selection = ['node-1', 'go-1'];
+      const SIDES = ['上', '下'];
+
+      function toggle(id) {
+        if (selection.includes(id)) selection = selection.filter((s) => s !== id);
+        // 3 つ目を選んだら、先に選んだほうを外す
+        else selection = [...selection, id].slice(-2);
+        renderMatrix();
+        renderCompare();
+      }
+
+      function cellSub(p, s) {
+        if (!results.has(p.id)) return '';
+        if (!s.valid) return s.errors ? `エラー ${s.errors} 件` : '計測中…';
+        if (s.mismatch) return `判定の食い違い ${s.mismatch} 件`;
+        if (!p.count) return `p95 ${fmt(s.p95)}`;
+        if (s.waited) return `終了待ち ${s.waited}/${s.same}`;
+        return `相乗り ${s.same}/${s.valid}`;
+      }
+
+      function renderMatrix() {
+        const rows = ROWS.map((row) => {
+          const tr = el('tr', {}, el('th', { scope: 'row', textContent: row.label }));
+          for (const p of PATTERNS.filter((p) => p.target === row.target)) {
+            const s = summarize(p, results.get(p.id) ?? []);
+            const classes = ['cell'];
+            if (p.count && s.waited) classes.push('waited');
+            if (running === p.id) classes.push('running');
+            const side = selection.indexOf(p.id);
+            if (side >= 0) classes.push('selected');
+            const button = el(
+              'button',
+              { className: classes.join(' '), title: tooltip(p, s), ariaPressed: String(side >= 0) },
+              ...(side >= 0 ? [el('span', { className: 'badge', textContent: SIDES[side] })] : []),
+              el('div', { className: 'v', textContent: results.has(p.id) ? fmt(s.p50) : '—' }),
+              el('div', { className: 'sub', textContent: cellSub(p, s) }),
+            );
+            button.addEventListener('click', () => toggle(p.id));
+            tr.append(el('td', {}, button));
+          }
+          return tr;
+        });
+        $('matrix').replaceChildren(...rows);
+      }
+
+      function tooltip(p, s) {
+        if (!results.has(p.id)) return p.label;
+        return [
+          p.label,
+          `/ping p50 ${fmt(s.p50)} / p95 ${fmt(s.p95)} / 最大 ${fmt(s.max)}`,
+          p.count ? `相乗り ${s.same}/${s.valid}、別の環境の /ping p50 ${fmt(s.otherP50)}` : null,
+          p.count ? `/cpu の処理時間 p50 ${fmt(s.cpuP50)}` : null,
+          s.invalid ? `無効 ${s.invalid} 件（/ping を送る前に /cpu が終わっていた）を除外` : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+
+      // 選んだマスの内訳を上下に並べる
+      function renderCompare() {
+        const picked = selection.map((id) => PATTERNS.find((p) => p.id === id));
+        if (!picked.length) {
+          $('compare').replaceChildren(el('p', { className: 'muted small', textContent: 'マスを選ぶと、ここに内訳が並びます（2 つまで）' }));
+          return;
+        }
+        // 見比べやすいよう、横軸は上下とも設定した幅で固定する。グリッド線は 10 等分
+        const scale = Math.max(50, Number($('axis').value) || 500);
+        $('compare').replaceChildren(...picked.map((p, i) => panel(p, SIDES[i], scale)));
+      }
+
+      function panel(p, side, scale) {
+        const box = el('section', { className: 'detail' });
+        const trials = results.get(p.id) ?? [];
+        const bar = (className, r) => {
+          const node = el('div', { className: `bar ${className}` });
+          node.style.left = `${(r.start / scale) * 100}%`;
+          node.style.width = `${((r.end - r.start) / scale) * 100}%`;
+          return el('div', { className: 'lane' }, node);
+        };
+
+        const rows = trials.map((r, i) => {
+          const n = el('span', { className: 'n', textContent: i + 1 });
+          if (r.error) return el('div', { className: 'row' }, n, el('span', { className: 'muted', textContent: r.error }));
+          const kind = r.sameEnv === false ? 'other' : r.waited ? 'wait' : '';
+          const track = el('div', { className: 'track' }, ...r.cpus.map((c) => bar('cpu', c)), bar(`ping ${kind}`, r.ping));
+          let chip;
+          if (r.invalid) chip = el('span', { className: 'chip warn', textContent: '無効' });
+          else if (r.sameEnv == null) chip = el('span', { className: 'chip', textContent: r.ping.envId.slice(0, 8) });
+          else if (r.sameLogStream != null && r.sameLogStream !== r.sameEnv) chip = el('span', { className: 'chip warn', textContent: '食い違い' });
+          else chip = el('span', { className: `chip ${r.sameEnv ? 'same' : ''}`, textContent: r.sameEnv ? '相乗り' : '別の環境' });
+          const title = [
+            `/ping  ${Math.round(r.ping.start)} ms 後に送信、${Math.round(r.ping.end - r.ping.start)} ms で応答  envId ${r.ping.envId}`,
+            ...r.cpus.map((c) => `/cpu  処理 ${c.ms} ms  envId ${c.envId}`),
+            `logstream  ${r.ping.logStream ?? 'なし（ローカル）'}`,
+          ].join('\n');
+          return el('div', { className: 'row', title }, n, track, el('span', { className: 'ms', textContent: fmt(r.ping.end - r.ping.start) }), chip);
+        });
+
+        const status = running === p.id ? '計測中…' : trials.length ? `${trials.length} 回` : '未計測';
+        box.replaceChildren(
+          el(
+            'header',
+            {},
+            el('span', { className: 'badge', textContent: side }),
+            el('h2', { textContent: p.label }),
+            el('span', { className: 'muted small', textContent: status }),
+          ),
+          el(
+            'div',
+            { className: 'legend' },
+            ...(p.count ? [swatch('var(--cpu)', '/cpu')] : []),
+            swatch('var(--ping)', '/ping'),
+            ...(p.count ? [swatch('var(--wait)', '/ping（/cpu の終了待ち）'), swatch('var(--other)', '/ping（別の環境）')] : []),
+          ),
+          el(
+            'div',
+            { className: 'axis' },
+            el('span'),
+            // 数字は 2 本おきのグリッド線（20% ごと）に合わせて置く
+            el(
+              'div',
+              { className: 'scale' },
+              ...[0, 0.2, 0.4, 0.6, 0.8, 1].map((f) => {
+                const tick = el('span', { textContent: f === 1 ? `${scale} ms` : `${Math.round(scale * f)}` });
+                tick.style.left = `${f * 100}%`;
+                return tick;
+              }),
+            ),
+            el('span'),
+            el('span'),
+          ),
+          ...rows,
+          el('details', { className: 'raw small' }, el('summary', { className: 'muted', textContent: '生データ' }), el('pre', { textContent: JSON.stringify(trials, null, 2) })),
+        );
+        return box;
+      }
+
+      function swatch(color, text) {
+        const mark = el('span', { className: 'swatch' });
+        mark.style.background = color;
+        return el('span', {}, mark, text);
+      }
+
+      let stopped = false;
+      $('stop').addEventListener('click', () => {
+        stopped = true;
+        $('stop').disabled = true;
+      });
+
+      $('run').addEventListener('click', async () => {
+        const runs = Number($('runs').value);
+        const options = { delay: Number($('delay').value), cpuMs: Number($('cpu-ms').value) };
+        const interval = Number($('interval').value);
+        stopped = false;
+        $('run').disabled = true;
+        $('stop').disabled = false;
+        results.clear();
+        try {
+          for (const [index, p] of PATTERNS.entries()) {
+            if (stopped) break;
+            const trials = [];
+            results.set(p.id, trials);
+            running = p.id;
+            const step = `${index + 1}/${PATTERNS.length} ${p.label}`;
+            // 温める。接続を張り、実行環境を起こしておく。結果には含めない
+            for (let i = 0; i < WARMUP && !stopped; i++) {
+              $('progress').textContent = `${step}（準備中）`;
+              renderMatrix();
+              renderCompare();
+              await trial(p, options).catch(() => {});
+              await sleep(interval);
+            }
+            for (let i = 0; i < runs && !stopped; i++) {
+              $('progress').textContent = `${step}（${i + 1}/${runs}）`;
+              try {
+                trials.push(await trial(p, options));
+              } catch (err) {
+                trials.push({ error: String(err) });
+              }
+              renderMatrix();
+              renderCompare();
+              await sleep(interval);
+            }
+          }
+          $('progress').textContent = stopped ? '停止しました' : '完了';
+        } finally {
+          running = null;
+          $('run').disabled = false;
+          $('stop').disabled = true;
+          renderMatrix();
+          renderCompare();
+        }
+      });
+
+      $('copy-md').addEventListener('click', async () => {
+        const cell = (p) => {
+          const s = summarize(p, results.get(p.id) ?? []);
+          if (!s.valid) return '—';
+          return p.count && s.waited ? `${fmt(s.p50)}（終了待ち ${s.waited}/${s.same}）` : fmt(s.p50);
+        };
+        const lines = [
+          `| | ${COLUMNS.join(' | ')} |`,
+          '| --- | --- | --- | --- |',
+          ...ROWS.map((row) => `| ${row.label} | ${PATTERNS.filter((p) => p.target === row.target).map(cell).join(' | ')} |`),
+          '',
+          '| パターン | /ping p50 | p95 | 最大 | 相乗り | 終了待ち | 別の環境の /ping p50 | /cpu の処理時間 p50 |',
+          '| --- | --- | --- | --- | --- | --- | --- | --- |',
+          ...PATTERNS.filter((p) => results.has(p.id)).map((p) => {
+            const s = summarize(p, results.get(p.id));
+            const sameCell = p.count ? `${s.same}/${s.valid}` : '—';
+            const waitedCell = p.count ? `${s.waited}/${s.same}` : '—';
+            return `| ${p.label} | ${fmt(s.p50)} | ${fmt(s.p95)} | ${fmt(s.max)} | ${sameCell} | ${waitedCell} | ${p.count ? fmt(s.otherP50) : '—'} | ${p.count ? fmt(s.cpuP50) : '—'} |`;
+          }),
+          '',
+          `各 ${$('runs').value} 回。/cpu は ${$('cpu-ms').value} ms CPU を回し、/ping は /cpu の ${$('delay').value} ms 後に送信。ブラウザから ${location.host} 経由で計測。${$('env-info').textContent}`,
+        ];
+        try {
+          await navigator.clipboard.writeText(lines.join('\n'));
+          $('copied').textContent = 'コピーしました';
+        } catch (err) {
+          $('copied').textContent = `コピーできませんでした（${err}）`;
+        }
+      });
+
+      $('axis').addEventListener('input', renderCompare);
+
+      renderMatrix();
+      renderCompare();
+    </script>
+  </body>
+</html>
