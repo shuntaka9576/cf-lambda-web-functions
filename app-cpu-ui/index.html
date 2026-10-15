@@ -183,6 +183,15 @@
         font-size: 0.8rem;
         color: var(--muted);
       }
+      .cell .note {
+        font-size: 0.7rem;
+        color: var(--muted);
+      }
+      .matrix thead small {
+        display: block;
+        font-weight: normal;
+        font-size: 0.75rem;
+      }
       .cell.waited .v,
       .cell.waited .sub {
         color: var(--wait);
@@ -332,10 +341,11 @@
         </p>
         <div class="form">
           <label>回数 <input id="runs" type="number" value="20" min="1" max="100" /></label>
-          <label>CPU を回す時間 (ms) <input id="cpu-ms" type="number" value="100" min="1" max="5000" /></label>
+          <label>CPU を回す時間 (ms) <input id="cpu-ms" type="number" value="500" min="1" max="5000" /></label>
+          <label>2 本目の /cpu をずらす (ms) <input id="gap" type="number" value="50" min="0" max="1000" /></label>
           <label>/cpu → /ping の間隔 (ms) <input id="delay" type="number" value="15" min="0" max="1000" /></label>
           <label>試行の間隔 (ms) <input id="interval" type="number" value="500" min="0" max="5000" /></label>
-          <label>横軸の幅 (ms) <input id="axis" type="number" value="500" min="50" max="5000" step="50" /></label>
+          <label>横軸の幅 (ms) <input id="axis" type="number" value="1000" min="50" max="5000" step="50" /></label>
           <div class="buttons">
             <button id="run" class="primary">計測する</button>
             <button id="stop" disabled>停止</button>
@@ -353,19 +363,14 @@
         <div class="table-wrap">
           <table class="matrix">
             <thead>
-              <tr>
-                <th></th>
-                <th>/ping だけ</th>
-                <th>/cpu 1 本の最中</th>
-                <th>/cpu 2 本の最中</th>
-              </tr>
+              <tr id="matrix-head"></tr>
             </thead>
             <tbody id="matrix"></tbody>
           </table>
         </div>
         <p class="muted small">
-          /ping の応答時間の中央値。相乗り（/cpu を処理中の実行環境に /ping も振り分けられた）試行だけで集計し、赤は
-          /cpu の終了を待った試行がある。マスを 2 つまで選ぶと、下で上下に並べて比べられます
+          /ping の応答時間の中央値。実行環境は最大 2 つ（maxEnvironments）。「どの環境も処理中」は /cpu を 2 本ずらして送り、両方の環境を埋めてから
+          /ping を送る。赤は半分以上の試行で /ping が /cpu の終了を待ったもの。マスを 2 つまで選ぶと、下で上下に並べて比べられます
         </p>
         <div id="compare" class="compare"></div>
       </main>
@@ -376,10 +381,13 @@
         { target: 'node', label: 'Node.js' },
         { target: 'go', label: 'Go' },
       ];
-      const COLUMNS = ['/ping だけ', '/cpu 1 本の最中', '/cpu 2 本の最中'];
-      // 実装ごとに、/cpu を 0〜2 本送った状態で /ping を測る
+      const COLUMNS = [
+        { key: 'ping', label: '/ping だけ', note: '比較の基準', count: 0 },
+        { key: 'idle', label: '空いている環境がある', note: '/cpu 1 本の最中', count: 1 },
+        { key: 'full', label: 'どの環境も処理中', note: '/cpu を各環境に 1 本ずつ', count: 2 },
+      ];
       const PATTERNS = ROWS.flatMap((row) =>
-        [0, 1, 2].map((count) => ({ id: `${row.target}-${count}`, target: row.target, count, label: `${row.label} ${COLUMNS[count]}` })),
+        COLUMNS.map((col) => ({ id: `${row.target}-${col.key}`, target: row.target, col: col.key, count: col.count, label: `${row.label}：${col.label}` })),
       );
       const WARMUP = 3;
 
@@ -390,7 +398,7 @@
         return node;
       };
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      // タブが裏に回ると setTimeout は 1 秒単位に間引かれる。/ping を送るまでの待ちは
+      // タブが裏に回ると setTimeout は 1 秒単位に間引かれる。/cpu や /ping を送るまでの待ちは
       // 間引かれない MessageChannel で刻み、指定した ms で送れるようにする
       const channel = new MessageChannel();
       const preciseSleep = (ms) =>
@@ -429,9 +437,14 @@
       }
 
       // /cpu を count 本送り、delay ms 後に /ping を送る。時刻は試行の開始からの ms にそろえる
-      async function trial(p, { delay, cpuMs }) {
+      async function trial(p, { delay, gap, cpuMs }) {
         const t0 = performance.now();
-        const pending = Array.from({ length: p.count }, () => get(`/${p.target}/cpu?ms=${cpuMs}`));
+        const pending = [];
+        for (let i = 0; i < p.count; i++) {
+          // 2 本目は gap ms ずらす。Lambda は空いている環境に回すので、各環境に 1 本ずつ入る
+          if (i > 0) await preciseSleep(gap);
+          pending.push(get(`/${p.target}/cpu?ms=${cpuMs}`));
+        }
         if (p.count) await preciseSleep(delay);
         const ping = await get(`/${p.target}/ping`);
         const cpus = await Promise.all(pending);
@@ -449,6 +462,8 @@
           // /ping を送る前に /cpu の応答が届いていたら、重なりを測れていないので集計から外す
           invalid: cpus.some((c) => c.end <= ping.start),
           sameEnv: cpus.length ? same.length > 0 : null,
+          // /cpu が別々の環境に入ったか。どの環境も処理中にできたかの確認に使う
+          split: cpus.length > 1 ? new Set(cpus.map((c) => c.envId)).size === cpus.length : null,
           // アプリの envId とは別に、Lambda のログストリームでも同じ環境かを確かめる
           sameLogStream: ping.logStream && cpus.length ? cpus.some((c) => c.logStream === ping.logStream) : null,
           // 同じ環境の /cpu が終わってから /ping のハンドラーが動いたか。同じプロセスの時計どうしで比べる
@@ -462,32 +477,31 @@
         return sorted[Math.max(0, Math.ceil(sorted.length * q) - 1)];
       }
 
+      // /ping の応答時間は、クライアントが実際に待った時間として全試行で集計する
       function summarize(p, trials) {
-        const rtt = (r) => r.ping.end - r.ping.start;
         const valid = trials.filter((r) => !r.error && !r.invalid);
-        const same = p.count ? valid.filter((r) => r.sameEnv) : valid;
-        const other = p.count ? valid.filter((r) => !r.sameEnv) : [];
-        const pings = same.map(rtt);
+        const pings = valid.map((r) => r.ping.end - r.ping.start);
         const checked = valid.filter((r) => r.sameLogStream !== null);
         return {
           valid: valid.length,
           errors: trials.filter((r) => r.error).length,
           invalid: trials.filter((r) => r.invalid).length,
-          same: same.length,
-          waited: same.filter((r) => r.waited).length,
+          same: valid.filter((r) => r.sameEnv).length,
+          waited: valid.filter((r) => r.waited).length,
+          split: valid.filter((r) => r.split).length,
           mismatch: checked.filter((r) => r.sameLogStream !== r.sameEnv).length,
           p50: percentile(pings, 0.5),
           p95: percentile(pings, 0.95),
           max: pings.length ? Math.max(...pings) : null,
-          otherP50: percentile(other.map(rtt), 0.5),
           cpuP50: percentile(valid.flatMap((r) => r.cpus.map((c) => c.ms)), 0.5),
         };
       }
+      const mostlyWaited = (s) => s.valid > 0 && s.waited / s.valid >= 0.5;
 
       const results = new Map();
       let running = null;
-      // 下で上下に並べるマス。最初は /cpu 1 本の最中の Node.js と Go を比べる
-      let selection = ['node-1', 'go-1'];
+      // 下で上下に並べるマス。最初は「どの環境も処理中」の Node.js と Go を比べる
+      let selection = ['node-full', 'go-full'];
       const SIDES = ['上', '下'];
 
       function toggle(id) {
@@ -498,31 +512,37 @@
         renderCompare();
       }
 
-      function cellSub(p, s) {
-        if (!results.has(p.id)) return '';
-        if (!s.valid) return s.errors ? `エラー ${s.errors} 件` : '計測中…';
-        if (s.mismatch) return `判定の食い違い ${s.mismatch} 件`;
-        if (!p.count) return `p95 ${fmt(s.p95)}`;
-        if (s.waited) return `終了待ち ${s.waited}/${s.same}`;
-        return `相乗り ${s.same}/${s.valid}`;
+      function cellLines(p, s) {
+        if (!results.has(p.id)) return [];
+        if (!s.valid) return [s.errors ? `エラー ${s.errors} 件` : '計測中…'];
+        if (s.mismatch) return [`判定の食い違い ${s.mismatch} 件`];
+        if (p.col === 'ping') return [`p95 ${fmt(s.p95)}`];
+        if (p.col === 'idle') return [`別の環境へ ${s.valid - s.same}/${s.valid}`];
+        return [`終了待ち ${s.waited}/${s.valid}`, `両方の環境が処理中 ${s.split}/${s.valid}`];
       }
 
       function renderMatrix() {
+        $('matrix-head').replaceChildren(
+          el('th'),
+          ...COLUMNS.map((col) => el('th', {}, col.label, el('small', { textContent: col.note }))),
+        );
         const rows = ROWS.map((row) => {
           const tr = el('tr', {}, el('th', { scope: 'row', textContent: row.label }));
           for (const p of PATTERNS.filter((p) => p.target === row.target)) {
             const s = summarize(p, results.get(p.id) ?? []);
             const classes = ['cell'];
-            if (p.count && s.waited) classes.push('waited');
+            if (p.count && mostlyWaited(s)) classes.push('waited');
             if (running === p.id) classes.push('running');
             const side = selection.indexOf(p.id);
             if (side >= 0) classes.push('selected');
+            const [sub, note] = cellLines(p, s);
             const button = el(
               'button',
               { className: classes.join(' '), title: tooltip(p, s), ariaPressed: String(side >= 0) },
               ...(side >= 0 ? [el('span', { className: 'badge', textContent: SIDES[side] })] : []),
               el('div', { className: 'v', textContent: results.has(p.id) ? fmt(s.p50) : '—' }),
-              el('div', { className: 'sub', textContent: cellSub(p, s) }),
+              el('div', { className: 'sub', textContent: sub ?? '' }),
+              ...(note ? [el('div', { className: 'note', textContent: note })] : []),
             );
             button.addEventListener('click', () => toggle(p.id));
             tr.append(el('td', {}, button));
@@ -537,7 +557,8 @@
         return [
           p.label,
           `/ping p50 ${fmt(s.p50)} / p95 ${fmt(s.p95)} / 最大 ${fmt(s.max)}`,
-          p.count ? `相乗り ${s.same}/${s.valid}、別の環境の /ping p50 ${fmt(s.otherP50)}` : null,
+          p.count ? `/cpu と同じ環境 ${s.same}/${s.valid}、/cpu の終了待ち ${s.waited}/${s.valid}` : null,
+          p.count > 1 ? `/cpu が別々の環境に入った ${s.split}/${s.valid}` : null,
           p.count ? `/cpu の処理時間 p50 ${fmt(s.cpuP50)}` : null,
           s.invalid ? `無効 ${s.invalid} 件（/ping を送る前に /cpu が終わっていた）を除外` : null,
         ]
@@ -553,7 +574,7 @@
           return;
         }
         // 見比べやすいよう、横軸は上下とも設定した幅で固定する。グリッド線は 10 等分
-        const scale = Math.max(50, Number($('axis').value) || 500);
+        const scale = Math.max(50, Number($('axis').value) || 1000);
         $('compare').replaceChildren(...picked.map((p, i) => panel(p, SIDES[i], scale)));
       }
 
@@ -576,10 +597,11 @@
           if (r.invalid) chip = el('span', { className: 'chip warn', textContent: '無効' });
           else if (r.sameEnv == null) chip = el('span', { className: 'chip', textContent: r.ping.envId.slice(0, 8) });
           else if (r.sameLogStream != null && r.sameLogStream !== r.sameEnv) chip = el('span', { className: 'chip warn', textContent: '食い違い' });
+          else if (r.split === false) chip = el('span', { className: 'chip warn', textContent: '片方に 2 本', title: '/cpu が 2 本とも同じ環境に入った' });
           else chip = el('span', { className: `chip ${r.sameEnv ? 'same' : ''}`, textContent: r.sameEnv ? '相乗り' : '別の環境' });
           const title = [
             `/ping  ${Math.round(r.ping.start)} ms 後に送信、${Math.round(r.ping.end - r.ping.start)} ms で応答  envId ${r.ping.envId}`,
-            ...r.cpus.map((c) => `/cpu  処理 ${c.ms} ms  envId ${c.envId}`),
+            ...r.cpus.map((c) => `/cpu  ${Math.round(c.start)} ms 後に送信、処理 ${c.ms} ms  envId ${c.envId}`),
             `logstream  ${r.ping.logStream ?? 'なし（ローカル）'}`,
           ].join('\n');
           return el('div', { className: 'row', title }, n, track, el('span', { className: 'ms', textContent: fmt(r.ping.end - r.ping.start) }), chip);
@@ -638,7 +660,7 @@
 
       $('run').addEventListener('click', async () => {
         const runs = Number($('runs').value);
-        const options = { delay: Number($('delay').value), cpuMs: Number($('cpu-ms').value) };
+        const options = { delay: Number($('delay').value), gap: Number($('gap').value), cpuMs: Number($('cpu-ms').value) };
         const interval = Number($('interval').value);
         stopped = false;
         $('run').disabled = true;
@@ -685,23 +707,24 @@
         const cell = (p) => {
           const s = summarize(p, results.get(p.id) ?? []);
           if (!s.valid) return '—';
-          return p.count && s.waited ? `${fmt(s.p50)}（終了待ち ${s.waited}/${s.same}）` : fmt(s.p50);
+          if (p.col === 'idle') return `${fmt(s.p50)}（別の環境へ ${s.valid - s.same}/${s.valid}）`;
+          if (p.col === 'full') return `${fmt(s.p50)}（終了待ち ${s.waited}/${s.valid}）`;
+          return fmt(s.p50);
         };
         const lines = [
-          `| | ${COLUMNS.join(' | ')} |`,
+          `| | ${COLUMNS.map((c) => c.label).join(' | ')} |`,
           '| --- | --- | --- | --- |',
           ...ROWS.map((row) => `| ${row.label} | ${PATTERNS.filter((p) => p.target === row.target).map(cell).join(' | ')} |`),
           '',
-          '| パターン | /ping p50 | p95 | 最大 | 相乗り | 終了待ち | 別の環境の /ping p50 | /cpu の処理時間 p50 |',
+          '| パターン | /ping p50 | p95 | 最大 | /cpu と同じ環境 | /cpu の終了待ち | 両方の環境が処理中 | /cpu の処理時間 p50 |',
           '| --- | --- | --- | --- | --- | --- | --- | --- |',
           ...PATTERNS.filter((p) => results.has(p.id)).map((p) => {
             const s = summarize(p, results.get(p.id));
-            const sameCell = p.count ? `${s.same}/${s.valid}` : '—';
-            const waitedCell = p.count ? `${s.waited}/${s.same}` : '—';
-            return `| ${p.label} | ${fmt(s.p50)} | ${fmt(s.p95)} | ${fmt(s.max)} | ${sameCell} | ${waitedCell} | ${p.count ? fmt(s.otherP50) : '—'} | ${p.count ? fmt(s.cpuP50) : '—'} |`;
+            const of = (n) => (p.count ? `${n}/${s.valid}` : '—');
+            return `| ${p.label} | ${fmt(s.p50)} | ${fmt(s.p95)} | ${fmt(s.max)} | ${of(s.same)} | ${of(s.waited)} | ${p.count > 1 ? of(s.split) : '—'} | ${p.count ? fmt(s.cpuP50) : '—'} |`;
           }),
           '',
-          `各 ${$('runs').value} 回。/cpu は ${$('cpu-ms').value} ms CPU を回し、/ping は /cpu の ${$('delay').value} ms 後に送信。ブラウザから ${location.host} 経由で計測。${$('env-info').textContent}`,
+          `各 ${$('runs').value} 回。/cpu は ${$('cpu-ms').value} ms CPU を回す。「どの環境も処理中」は /cpu を ${$('gap').value} ms ずらして 2 本送る。/ping は最後の /cpu の ${$('delay').value} ms 後に送信。ブラウザから ${location.host} 経由で計測。${$('env-info').textContent}`,
         ];
         try {
           await navigator.clipboard.writeText(lines.join('\n'));
